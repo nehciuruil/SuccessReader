@@ -1,6 +1,4 @@
-<p align="center">
-  <strong>SuccessReader</strong>
-</p>
+  # SuccessReader
 
 <p align="center">
   <strong>一个为低干扰阅读而设计的悬浮桌面阅读器。</strong>
