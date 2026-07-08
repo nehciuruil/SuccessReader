@@ -41,7 +41,7 @@ SuccessReader 的方向相反：它更轻、更安静、更适合挂在桌面边
 - 面向桌面、低干扰、可拖拽导入的轻量阅读体验
 
 <p align="center">
-  <img src=".github/assets/cheatreader-intro-transparent-en.svg" alt="CheatReader 透明模式介绍图" />
+  <img src=".github/assets/cheatreader-intro-transparent-en.svg" alt="SuccessReader 透明模式介绍图" />
 </p>
 
 ![SuccessReader 全屏演示](https://raw.githubusercontent.com/yaoyao2mm/cheatreader/main/.github/assets/full-screen-1.gif)
