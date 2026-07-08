@@ -1,0 +1,874 @@
+import 'dart:async';
+import 'dart:math' as math;
+
+import 'package:flutter/foundation.dart';
+import 'package:flutter/painting.dart';
+
+import 'platform_window_controller_base.dart';
+import 'reader_book.dart';
+import 'reader_file_bookmark_service.dart';
+import 'reader_import_service.dart';
+import 'reader_library_storage.dart';
+import 'reader_localization.dart';
+import 'reader_preferences.dart';
+import 'reader_settings.dart';
+import 'reader_shortcuts.dart';
+
+class ReaderController extends ChangeNotifier {
+  ReaderController({
+    required String initialContent,
+    required ReaderPreferencesStore preferencesStore,
+    required PlatformWindowController windowController,
+    required ReaderFileBookmarkService fileBookmarkService,
+    required ReaderImportService importService,
+    required ReaderLibraryStorage libraryStorage,
+  }) : _preferencesStore = preferencesStore,
+       _windowController = windowController,
+       _fileBookmarkService = fileBookmarkService,
+       _importService = importService,
+       _libraryStorage = libraryStorage,
+       _fallbackContent = initialContent,
+       _lines = _splitLines(
+         initialContent,
+         ReaderSettings.defaults.languageMode,
+       );
+
+  final ReaderPreferencesStore _preferencesStore;
+  final PlatformWindowController _windowController;
+  final ReaderFileBookmarkService _fileBookmarkService;
+  final ReaderImportService _importService;
+  final ReaderLibraryStorage _libraryStorage;
+  final String _fallbackContent;
+
+  ReaderSettings _settings = ReaderSettings.defaults;
+  List<ReaderBookRecord> _bookshelf = const [];
+  final Set<String> _staleBookPaths = <String>{};
+  List<String> _lines;
+  int _readLineIndex = 0;
+  int _burnedLineCount = 0;
+  int _pageLineCount = 8;
+  String? _currentBookPath;
+  String _currentDisplayName = stringsForLanguageMode(
+    ReaderSettings.defaults.languageMode,
+  ).demoTitle;
+  bool _dragTargetActive = false;
+  bool _bossKeyHidden = false;
+
+  ReaderSettings get settings => _settings;
+  List<ReaderBookRecord> get bookshelf =>
+      List<ReaderBookRecord>.unmodifiable(_bookshelf);
+  bool get dragTargetActive => _dragTargetActive;
+  bool get isBossKeyHidden => _bossKeyHidden;
+  String get currentDisplayName => _currentDisplayName;
+  bool get hasImportedBook => _currentBookPath != null;
+  ReaderBookRecord? get currentBook => _findBookRecord(_currentBookPath);
+  bool get burnModeEnabled => false;
+  int get currentLineIndex => _activeStartLineIndex;
+  int get totalLineCount => _lines.length;
+  int get visibleLineCount => _settings.oneLineMode ? 1 : _pageLineCount;
+  int get currentLineNumber => currentLineIndex + 1;
+  int get currentPageNumber => ((currentLineIndex ~/ visibleLineCount) + 1);
+  int get totalPageCount =>
+      math.max(1, ((totalLineCount - 1) ~/ visibleLineCount) + 1);
+  int get currentProgressPercent {
+    if (totalLineCount <= 1) {
+      return 100;
+    }
+    return ((currentLineIndex / (totalLineCount - 1)) * 100).round();
+  }
+
+  String lineAt(int index) {
+    if (_lines.isEmpty) {
+      return '';
+    }
+
+    return _lines[_clampLineIndex(index)];
+  }
+
+  int get _activeStartLineIndex =>
+      burnModeEnabled ? _burnedLineCount : _readLineIndex;
+
+  List<String> get visibleLines {
+    final endIndex = math.min(
+      _activeStartLineIndex + visibleLineCount,
+      _lines.length,
+    );
+    return _lines.sublist(_activeStartLineIndex, endIndex);
+  }
+
+  String get visibleText => visibleLines.join('\n');
+
+  Future<void> initialize() async {
+    final snapshot = await _preferencesStore.loadSnapshot();
+    _settings = snapshot.settings;
+    _bookshelf = _sortBookshelf(snapshot.bookshelf);
+    await _windowController.syncPresentation(_settings);
+
+    if (_bookshelf.isNotEmpty) {
+      final didRestore = await _restoreMostRecentBook();
+      if (!didRestore) {
+        _restoreFallbackContent();
+      }
+    } else {
+      _restoreFallbackContent();
+    }
+
+    notifyListeners();
+  }
+
+  void updateVisibleLineCapacity(int value) {
+    final normalizedValue = math.max(1, value);
+    if (_pageLineCount == normalizedValue) {
+      return;
+    }
+
+    _pageLineCount = normalizedValue;
+    _readLineIndex = _clampLineIndex(_readLineIndex);
+    _burnedLineCount = _clampLineIndex(_burnedLineCount);
+    unawaited(_persistCurrentBookProgress());
+    notifyListeners();
+  }
+
+  void moveByLines(int delta) {
+    if (delta == 0) {
+      return;
+    }
+
+    final nextIndex = _clampLineIndex(_readLineIndex + delta);
+    if (nextIndex == _readLineIndex) {
+      return;
+    }
+
+    _readLineIndex = nextIndex;
+    _onProgressUpdated();
+  }
+
+  void nextLine() => moveByLines(1);
+
+  void previousLine() => moveByLines(-1);
+
+  void nextPage() => moveByLines(visibleLineCount);
+
+  void previousPage() => moveByLines(-visibleLineCount);
+
+  void jumpToLineNumber(int lineNumber) {
+    final normalizedLineNumber = lineNumber.clamp(1, totalLineCount);
+    final targetIndex = _clampLineIndex(normalizedLineNumber - 1);
+    if (targetIndex == _readLineIndex) {
+      return;
+    }
+
+    _readLineIndex = targetIndex;
+    _burnedLineCount = _clampLineIndex(_burnedLineCount);
+    _onProgressUpdated();
+  }
+
+  void jumpToPageNumber(int pageNumber) {
+    final normalizedPageNumber = pageNumber.clamp(1, totalPageCount);
+    final targetIndex = _clampLineIndex(
+      (normalizedPageNumber - 1) * visibleLineCount,
+    );
+    if (targetIndex == _readLineIndex) {
+      return;
+    }
+
+    _readLineIndex = targetIndex;
+    _burnedLineCount = _clampLineIndex(_burnedLineCount);
+    _onProgressUpdated();
+  }
+
+  void jumpToProgressPercent(int percent) {
+    final normalizedPercent = percent.clamp(0, 100);
+    final targetIndex = totalLineCount <= 1
+        ? 0
+        : ((totalLineCount - 1) * (normalizedPercent / 100)).round();
+    final clampedIndex = _clampLineIndex(targetIndex);
+    if (clampedIndex == _readLineIndex) {
+      return;
+    }
+
+    _readLineIndex = clampedIndex;
+    _burnedLineCount = _clampLineIndex(_burnedLineCount);
+    _onProgressUpdated();
+  }
+
+  int? jumpToSearchMatch(
+    String query, {
+    required bool forward,
+    int? anchorLineIndex,
+    bool includeAnchor = true,
+  }) {
+    final normalizedQuery = query.trim().toLowerCase();
+    if (normalizedQuery.isEmpty || _lines.isEmpty) {
+      return null;
+    }
+
+    final anchor = _clampLineIndex(anchorLineIndex ?? currentLineIndex);
+    for (var step = 0; step < _lines.length; step += 1) {
+      final offset = includeAnchor ? step : step + 1;
+      final index = _wrappedLineIndex(anchor, offset, forward: forward);
+      if (_lineContainsQuery(index, normalizedQuery)) {
+        _readLineIndex = index;
+        _burnedLineCount = _clampLineIndex(_burnedLineCount);
+        _onProgressUpdated();
+        return index;
+      }
+    }
+
+    return null;
+  }
+
+  void toggleOneLineMode() {
+    final nextOneLineMode = !_settings.oneLineMode;
+    if (nextOneLineMode) {
+      _readLineIndex = _preferredOneLineEntryIndex();
+      _burnedLineCount = _clampLineIndex(_burnedLineCount);
+    }
+    _updateSettings(_settings.copyWith(oneLineMode: nextOneLineMode));
+  }
+
+  void setModeToggleTrigger(ReaderModeToggleTrigger value) {
+    _updateSettings(_settings.copyWith(modeToggleTrigger: value));
+  }
+
+  void setLanguageMode(ReaderLanguageMode value) {
+    _updateSettings(_settings.copyWith(languageMode: value));
+  }
+
+  void toggleBurnMode() {
+    // Temporarily disabled until the feature is redesigned.
+  }
+
+  void setAlwaysOnTop(bool value) {
+    _updateSettings(_settings.copyWith(alwaysOnTop: value));
+  }
+
+  void setHideTaskbarIcon(bool value) {
+    _updateSettings(_settings.copyWith(hideTaskbarIcon: value));
+  }
+
+  void setReadingAnimationEnabled(bool value) {
+    _updateSettings(_settings.copyWith(readingAnimationEnabled: value));
+  }
+
+  void setPreferPunctuationLineBreaks(bool value) {
+    _updateSettings(_settings.copyWith(preferPunctuationLineBreaks: value));
+  }
+
+  void setAutoPageEnabled(bool value) {
+    _updateSettings(_settings.copyWith(autoPageEnabled: value));
+  }
+
+  void setAutoPageIntervalSeconds(int value) {
+    _updateSettings(
+      _settings.copyWith(
+        autoPageIntervalSeconds: _normalizeAutoPageInterval(value),
+      ),
+    );
+  }
+
+  void setAutoPageGranularity(ReaderAutoPageGranularity value) {
+    _updateSettings(_settings.copyWith(autoPageGranularity: value));
+  }
+
+  void setFontFamilyPreset(ReaderFontFamilyPreset value) {
+    _updateSettings(_settings.copyWith(fontFamilyPreset: value));
+  }
+
+  void setCustomFont({required String path, required String displayName}) {
+    _updateSettings(
+      _settings.copyWith(
+        fontFamilyPreset: ReaderFontFamilyPreset.custom,
+        customFontPath: path,
+        customFontDisplayName: displayName,
+      ),
+    );
+  }
+
+  void clearCustomFont() {
+    _updateSettings(
+      _settings.copyWith(
+        fontFamilyPreset:
+            _settings.fontFamilyPreset == ReaderFontFamilyPreset.custom
+            ? ReaderFontFamilyPreset.system
+            : _settings.fontFamilyPreset,
+        customFontPath: null,
+        customFontDisplayName: null,
+      ),
+    );
+  }
+
+  void setFontScale(double value) {
+    _updateSettings(_settings.copyWith(fontScale: _normalizeFontScale(value)));
+  }
+
+  void setLineSpacing(double value) {
+    _updateSettings(
+      _settings.copyWith(
+        lineSpacing: _normalizeDoubleSetting(
+          value,
+          min: ReaderSettings.minLineSpacing,
+          max: ReaderSettings.maxLineSpacing,
+          fallback: ReaderSettings.defaults.lineSpacing,
+        ),
+      ),
+    );
+  }
+
+  void setReadingWidthFactor(double value) {
+    _updateSettings(
+      _settings.copyWith(
+        readingWidthFactor: _normalizeDoubleSetting(
+          value,
+          min: ReaderSettings.minReadingWidthFactor,
+          max: ReaderSettings.maxReadingWidthFactor,
+          fallback: ReaderSettings.defaults.readingWidthFactor,
+        ),
+      ),
+    );
+  }
+
+  void setWindowOpacity(double value) {
+    _updateSettings(
+      _settings.copyWith(
+        windowOpacity: _normalizeDoubleSetting(
+          value,
+          min: ReaderSettings.minWindowOpacity,
+          max: ReaderSettings.maxWindowOpacity,
+          fallback: ReaderSettings.defaults.windowOpacity,
+        ),
+      ),
+    );
+  }
+
+  void setTransparentModeEnabled(bool value) {
+    _updateSettings(_settings.copyWith(transparentModeEnabled: value));
+  }
+
+  void setTransparentTextShadowEnabled(bool value) {
+    _updateSettings(_settings.copyWith(transparentTextShadowEnabled: value));
+  }
+
+  void setTextColorMode(ReaderTextColorMode value) {
+    if (value == ReaderTextColorMode.custom &&
+        _settings.textColorMode != ReaderTextColorMode.custom &&
+        _settings.customTextColorValue ==
+            ReaderSettings.defaults.customTextColorValue) {
+      _updateSettings(
+        _settings.copyWith(
+          textColorMode: value,
+          customTextColorValue: _effectiveAdaptiveTextColorValueFor(_settings),
+        ),
+      );
+      return;
+    }
+
+    _updateSettings(_settings.copyWith(textColorMode: value));
+  }
+
+  void setCustomTextColorValue(int value) {
+    _updateSettings(
+      _settings.copyWith(
+        customTextColorValue: _normalizeOpaqueColorValue(value),
+      ),
+    );
+  }
+
+  void setTextBrightnessFactor(double value) {
+    _updateSettings(
+      _settings.copyWith(
+        textBrightnessFactor: _normalizeTextBrightnessFactor(value),
+      ),
+    );
+  }
+
+  String? setShortcutBinding(
+    ReaderShortcutAction action,
+    ReaderShortcutKey key,
+  ) {
+    if (key.isModifierOnly) {
+      return stringsForSettings(_settings).shortcutConflictMessage;
+    }
+
+    final conflict = _settings.shortcutBindings.conflictingActionFor(
+      key,
+      excluding: action,
+    );
+    if (conflict != null) {
+      return stringsForSettings(_settings).shortcutConflictMessage;
+    }
+
+    _updateSettings(
+      _settings.copyWith(
+        shortcutBindings: _settings.shortcutBindings.copyWithAction(
+          action,
+          key,
+        ),
+      ),
+    );
+    return null;
+  }
+
+  Future<void> toggleBossKey() async {
+    if (!_windowController.supportsBossKey) {
+      return;
+    }
+
+    if (_bossKeyHidden) {
+      _bossKeyHidden = false;
+      await _windowController.restoreFromBossKey(_settings);
+    } else {
+      _bossKeyHidden = true;
+      await _windowController.hideForBossKey(_settings);
+    }
+    notifyListeners();
+  }
+
+  Future<void> locateReader() async {
+    if (!_windowController.supportsFloatingControls) {
+      return;
+    }
+
+    _bossKeyHidden = false;
+    await _windowController.locateReader(_settings);
+    notifyListeners();
+  }
+
+  void setDragTargetActive(bool value) {
+    if (_dragTargetActive == value) {
+      return;
+    }
+
+    _dragTargetActive = value;
+    notifyListeners();
+  }
+
+  bool isBookStale(String path) => _staleBookPaths.contains(path);
+
+  Future<String?> importFromPicker() async {
+    try {
+      final file = await _importService.pickTxtFile();
+      if (file == null) {
+        return null;
+      }
+
+      return _openImportedFile(file, storedBookPath: file.path);
+    } catch (_) {
+      return stringsForSettings(_settings).importFailure;
+    }
+  }
+
+  Future<String?> importFromPath(String path) async {
+    return _importFromResolvedPath(path, storedBookPath: path);
+  }
+
+  Future<String?> _importFromResolvedPath(
+    String path, {
+    required String storedBookPath,
+    String? existingBookmark,
+    String? existingStoredFilePath,
+  }) async {
+    if (!_importService.isSupportedTextFilePath(path)) {
+      return stringsForSettings(_settings).importUnsupportedFormat;
+    }
+
+    try {
+      final file = await _importService.openTxtFile(path);
+      return _openImportedFile(
+        file,
+        storedBookPath: storedBookPath,
+        existingBookmark: existingBookmark,
+        existingStoredFilePath: existingStoredFilePath,
+      );
+    } catch (_) {
+      _staleBookPaths.add(storedBookPath);
+      notifyListeners();
+      return stringsForSettings(_settings).importOpenFailure;
+    }
+  }
+
+  Future<String?> openBookshelfEntry(String path) async {
+    final record = _findBookRecord(path);
+    if (record == null) {
+      return importFromPath(path);
+    }
+
+    return _openBookshelfRecord(record);
+  }
+
+  Future<void> removeBookshelfEntry(String path) async {
+    final record = _findBookRecord(path);
+    final removingCurrentBook = _currentBookPath == path;
+    _bookshelf = _bookshelf
+        .where((book) => book.path != path)
+        .toList(growable: false);
+    _staleBookPaths.remove(path);
+    await _preferencesStore.saveBookshelf(_bookshelf);
+    if (record?.storedFilePath case final storedFilePath?) {
+      await _libraryStorage.deleteStoredFile(storedFilePath);
+    }
+
+    if (removingCurrentBook) {
+      if (_bookshelf.isEmpty) {
+        _restoreFallbackContent();
+        notifyListeners();
+        return;
+      }
+
+      final didRestore = await _restoreMostRecentBook();
+      if (!didRestore) {
+        _restoreFallbackContent();
+      }
+    }
+
+    notifyListeners();
+  }
+
+  int _clampLineIndex(int value) {
+    final maxStartIndex = math.max(0, _lines.length - 1);
+    return value.clamp(0, maxStartIndex);
+  }
+
+  void _onProgressUpdated() {
+    notifyListeners();
+    unawaited(_persistCurrentBookProgress());
+  }
+
+  void _updateSettings(ReaderSettings value) {
+    if (_settings.oneLineMode == value.oneLineMode &&
+        _settings.modeToggleTrigger == value.modeToggleTrigger &&
+        _settings.languageMode == value.languageMode &&
+        _settings.alwaysOnTop == value.alwaysOnTop &&
+        _settings.hideTaskbarIcon == value.hideTaskbarIcon &&
+        _settings.readingAnimationEnabled == value.readingAnimationEnabled &&
+        _settings.preferPunctuationLineBreaks ==
+            value.preferPunctuationLineBreaks &&
+        _settings.fontScale == value.fontScale &&
+        _settings.lineSpacing == value.lineSpacing &&
+        _settings.readingWidthFactor == value.readingWidthFactor &&
+        _settings.windowOpacity == value.windowOpacity &&
+        _settings.fontFamilyPreset == value.fontFamilyPreset &&
+        _settings.customFontPath == value.customFontPath &&
+        _settings.customFontDisplayName == value.customFontDisplayName &&
+        _settings.transparentModeEnabled == value.transparentModeEnabled &&
+        _settings.transparentTextShadowEnabled ==
+            value.transparentTextShadowEnabled &&
+        _settings.textColorMode == value.textColorMode &&
+        _settings.customTextColorValue == value.customTextColorValue &&
+        _settings.textBrightnessFactor == value.textBrightnessFactor &&
+        _settings.shortcutBindings == value.shortcutBindings &&
+        _settings.autoPageEnabled == value.autoPageEnabled &&
+        _settings.autoPageIntervalSeconds == value.autoPageIntervalSeconds &&
+        _settings.autoPageGranularity == value.autoPageGranularity) {
+      return;
+    }
+
+    _settings = value;
+    _readLineIndex = _clampLineIndex(_readLineIndex);
+    _burnedLineCount = _clampLineIndex(_burnedLineCount);
+    if (_currentBookPath == null) {
+      _currentDisplayName = stringsForSettings(_settings).demoTitle;
+      _lines = _splitLines(_fallbackContent, _settings.languageMode);
+    }
+    notifyListeners();
+    unawaited(_persistSettings());
+  }
+
+  Future<void> _persistSettings() async {
+    await _preferencesStore.saveSettings(_settings);
+    await _windowController.syncPresentation(_settings);
+  }
+
+  int _adaptiveTextColorValueFor(ReaderSettings settings) {
+    if (settings.transparentModeEnabled) {
+      return ReaderSettings.defaults.customTextColorValue;
+    }
+
+    return settings.windowOpacity < 0.78
+        ? 0xFF111111
+        : ReaderSettings.defaults.customTextColorValue;
+  }
+
+  int _effectiveAdaptiveTextColorValueFor(ReaderSettings settings) {
+    final baseColor = Color(_adaptiveTextColorValueFor(settings));
+    final hsl = HSLColor.fromColor(baseColor);
+    return _normalizeOpaqueColorValue(
+      hsl
+          .withLightness(
+            (hsl.lightness * settings.textBrightnessFactor).clamp(0.0, 1.0),
+          )
+          .toColor()
+          .toARGB32(),
+    );
+  }
+
+  int _normalizeOpaqueColorValue(int value) {
+    return 0xFF000000 | (value & 0x00FFFFFF);
+  }
+
+  double _normalizeTextBrightnessFactor(double value) {
+    if (value.isNaN) {
+      return ReaderSettings.defaultTextBrightnessFactor;
+    }
+
+    return value
+        .clamp(
+          ReaderSettings.minTextBrightnessFactor,
+          ReaderSettings.maxTextBrightnessFactor,
+        )
+        .toDouble();
+  }
+
+  double _normalizeFontScale(double value) {
+    if (value.isNaN) {
+      return ReaderSettings.defaults.fontScale;
+    }
+
+    return value
+        .clamp(ReaderSettings.minFontScale, ReaderSettings.maxFontScale)
+        .toDouble();
+  }
+
+  double _normalizeDoubleSetting(
+    double value, {
+    required double min,
+    required double max,
+    required double fallback,
+  }) {
+    if (value.isNaN) {
+      return fallback;
+    }
+
+    return value.clamp(min, max).toDouble();
+  }
+
+  int _normalizeAutoPageInterval(int value) {
+    return value.clamp(
+      ReaderSettings.minAutoPageIntervalSeconds,
+      ReaderSettings.maxAutoPageIntervalSeconds,
+    );
+  }
+
+  Future<void> _persistCurrentBookProgress() async {
+    final record = currentBook;
+    if (record == null) {
+      return;
+    }
+
+    _replaceBookRecord(
+      record.copyWith(
+        lastReadLineIndex: _readLineIndex,
+        burnedLineCount: 0,
+        burnModeEnabled: false,
+        lastOpenedAt: DateTime.now(),
+      ),
+    );
+    await _preferencesStore.saveBookshelf(_bookshelf);
+  }
+
+  Future<String?> _openImportedFile(
+    ImportedTextFile file, {
+    required String storedBookPath,
+    String? existingBookmark,
+    String? existingStoredFilePath,
+  }) async {
+    final existingRecord = _findBookRecord(storedBookPath);
+    final displayName = existingRecord?.displayName ?? file.displayName;
+    _staleBookPaths.remove(storedBookPath);
+    _lines = _splitLines(file.content, _settings.languageMode);
+    _currentBookPath = storedBookPath;
+    _currentDisplayName = displayName;
+
+    final storedFile = await _libraryStorage.saveImportedFile(
+      file,
+      existingStoredPath:
+          existingStoredFilePath ?? existingRecord?.storedFilePath,
+    );
+
+    final bookmark =
+        existingBookmark ??
+        existingRecord?.fileBookmark ??
+        await _fileBookmarkService.createBookmark(file.path);
+
+    final restoredReadLineIndex = _clampLineIndex(
+      existingRecord?.lastReadLineIndex ?? 0,
+    );
+    _readLineIndex = restoredReadLineIndex;
+    _burnedLineCount = 0;
+
+    final updatedRecord =
+        (existingRecord ??
+                ReaderBookRecord(
+                  path: storedBookPath,
+                  displayName: displayName,
+                  lastOpenedAt: DateTime.now(),
+                  lastReadLineIndex: 0,
+                  burnedLineCount: 0,
+                  burnModeEnabled: false,
+                  storedFilePath: storedFile.path,
+                  fileBookmark: bookmark,
+                ))
+            .copyWith(
+              displayName: displayName,
+              lastOpenedAt: DateTime.now(),
+              lastReadLineIndex: _readLineIndex,
+              burnedLineCount: 0,
+              burnModeEnabled: false,
+              storedFilePath: storedFile.path,
+              fileBookmark: bookmark,
+            );
+    _replaceBookRecord(updatedRecord);
+    await _preferencesStore.saveBookshelf(_bookshelf);
+    notifyListeners();
+    return null;
+  }
+
+  Future<bool> _restoreMostRecentBook() async {
+    if (_bookshelf.isEmpty) {
+      return false;
+    }
+
+    final message = await _openBookshelfRecord(_bookshelf.first);
+    return message == null;
+  }
+
+  Future<String?> _openBookshelfRecord(ReaderBookRecord record) async {
+    if (record.storedFilePath case final storedFilePath?) {
+      final localMessage = await _importFromResolvedPath(
+        storedFilePath,
+        storedBookPath: record.path,
+        existingBookmark: record.fileBookmark,
+        existingStoredFilePath: storedFilePath,
+      );
+      if (localMessage == null) {
+        return null;
+      }
+    }
+
+    var resolvedPath = record.path;
+    var resolvedBookmark = record.fileBookmark;
+
+    if (record.fileBookmark case final bookmark?) {
+      final resolved = await _fileBookmarkService.resolveBookmark(bookmark);
+      if (resolved != null) {
+        resolvedPath = resolved.path;
+        resolvedBookmark = resolved.refreshedBookmark ?? bookmark;
+      }
+    }
+
+    return _importFromResolvedPath(
+      resolvedPath,
+      storedBookPath: record.path,
+      existingBookmark: resolvedBookmark,
+      existingStoredFilePath: record.storedFilePath,
+    );
+  }
+
+  ReaderBookRecord? _findBookRecord(String? path) {
+    if (path == null) {
+      return null;
+    }
+
+    for (final book in _bookshelf) {
+      if (book.path == path) {
+        return book;
+      }
+    }
+    return null;
+  }
+
+  void _replaceBookRecord(ReaderBookRecord record) {
+    final nextBookshelf = _bookshelf
+        .where((book) => book.path != record.path)
+        .toList(growable: true);
+    nextBookshelf.add(record);
+    _bookshelf = _sortBookshelf(nextBookshelf);
+  }
+
+  void _restoreFallbackContent() {
+    _lines = _splitLines(_fallbackContent, _settings.languageMode);
+    _currentBookPath = null;
+    _currentDisplayName = stringsForSettings(_settings).demoTitle;
+    _readLineIndex = 0;
+    _burnedLineCount = 0;
+  }
+
+  static List<ReaderBookRecord> _sortBookshelf(
+    List<ReaderBookRecord> bookshelf,
+  ) {
+    final sorted = List<ReaderBookRecord>.from(bookshelf);
+    sorted.sort((a, b) => b.lastOpenedAt.compareTo(a.lastOpenedAt));
+    return List<ReaderBookRecord>.unmodifiable(sorted);
+  }
+
+  int _preferredOneLineEntryIndex() {
+    final currentIndex = _clampLineIndex(_readLineIndex);
+    final currentWindowEnd = math.min(
+      currentIndex + visibleLineCount,
+      _lines.length,
+    );
+    for (var index = currentIndex; index < currentWindowEnd; index += 1) {
+      if (_lineHasVisibleText(index)) {
+        return index;
+      }
+    }
+
+    if (_lineHasVisibleText(currentIndex)) {
+      return currentIndex;
+    }
+
+    for (var distance = 1; distance < _lines.length; distance += 1) {
+      final forward = currentIndex + distance;
+      if (forward < _lines.length && _lineHasVisibleText(forward)) {
+        return forward;
+      }
+
+      final backward = currentIndex - distance;
+      if (backward >= 0 && _lineHasVisibleText(backward)) {
+        return backward;
+      }
+    }
+
+    return currentIndex;
+  }
+
+  bool _lineHasVisibleText(int index) {
+    if (index < 0 || index >= _lines.length) {
+      return false;
+    }
+    return _lines[index].trim().isNotEmpty;
+  }
+
+  bool _lineContainsQuery(int index, String normalizedQuery) {
+    if (index < 0 || index >= _lines.length) {
+      return false;
+    }
+    return _lines[index].toLowerCase().contains(normalizedQuery);
+  }
+
+  int _wrappedLineIndex(int anchor, int offset, {required bool forward}) {
+    final delta = forward ? offset : -offset;
+    final raw = anchor + delta;
+    final count = _lines.length;
+    return ((raw % count) + count) % count;
+  }
+
+  static List<String> _splitLines(
+    String content,
+    ReaderLanguageMode languageMode,
+  ) {
+    final normalizedLines = content
+        .replaceAll('\r\n', '\n')
+        .replaceAll('\r', '\n')
+        .split('\n')
+        .map((line) => line.trimRight())
+        .toList(growable: false);
+
+    if (normalizedLines.isEmpty ||
+        normalizedLines.every((line) => line.isEmpty)) {
+      return <String>[stringsForLanguageMode(languageMode).emptyText];
+    }
+
+    return normalizedLines;
+  }
+}
