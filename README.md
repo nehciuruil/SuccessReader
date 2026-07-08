@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  CheatReader 让你在桌面角落继续读书，而不是把整个屏幕交给传统阅读应用。
+  SuccessReader 让你在桌面角落继续读书，而不是把整个屏幕交给传统阅读应用。
 </p>
 
 <p align="center">
