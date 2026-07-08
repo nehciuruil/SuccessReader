@@ -1,2 +1,89 @@
-# SuccessReader
-A floating desktop reader with transparent text-only mode for low-distraction reading.
+
+
+<p align="center">
+  <strong>一个为低干扰阅读而设计的悬浮桌面阅读器。</strong>
+</p>
+
+<p align="center">
+  CheatReader 让你在桌面角落继续读书，而不是把整个屏幕交给传统阅读应用。
+</p>
+
+<p align="center">
+  <img alt="Platform" src="https://img.shields.io/badge/platform-Flutter-54C5F8?style=flat-square">
+  <img alt="Desktop" src="https://img.shields.io/badge/focus-desktop-2F4858?style=flat-square">
+  <img alt="Formats" src="https://img.shields.io/badge/formats-txt%20%7C%20epub%20%7C%20html%20%7C%20md%20%7C%20fb2%20%7C%20docx%20%7C%20pdf-B08968?style=flat-square">
+  <img alt="UI" src="https://img.shields.io/badge/mode-transparent%20text--only-F0E6DC?style=flat-square&labelColor=16110F&color=F0E6DC">
+</p>
+
+> [!IMPORTANT]
+> SuccessReader 仅是一个本地多文件格式阅读器。
+> 它不支持任何 URL、网页链接、在线书源或其他远程内容导入。
+> 它不支持、鼓励或认可任何侵犯文字工作者、出版机构及其他著作权人的合法权益的行为。
+> 本项目仅供学习交流使用。
+> 作者本人不会将本软件用于任何商业用途，也不会依靠本软件获利。
+
+## 这个项目解决什么问题
+
+大多数阅读器都希望你“进入阅读状态”，占据主要注意力。
+SuccessReader 的方向相反：它更轻、更安静、更适合挂在桌面边缘，让你在工作流里继续读。
+
+## 亮点
+
+- 真正的透明文字模式，只保留文字，不压背景块
+- 单行 / 多行两种紧凑阅读模式
+- 支持双击、中键、快捷键等切换方式
+- 支持调节行距、阅读宽度和键盘控制，便于长时间使用
+- 支持按行号、页号、百分比直接跳转，也支持文本搜索和上一个 / 下一个匹配跳转
+- 支持加载本地自定义字体，并在字体选项里直接切换使用
+- 提供可快速隐藏并恢复窗口的老板键能力
+- 支持 `txt`、`epub`、`html`、`markdown`、`fb2`、`docx`、`pdf`
+- 导入后的本地托管副本，重启后仍能恢复阅读
+- 面向桌面、低干扰、可拖拽导入的轻量阅读体验
+
+<p align="center">
+  <img src=".github/assets/cheatreader-intro-transparent-en.svg" alt="CheatReader 透明模式介绍图" />
+</p>
+
+![SuccessReader 全屏演示](https://raw.githubusercontent.com/yaoyao2mm/cheatreader/main/.github/assets/full-screen-1.gif)
+
+## 平台支持
+
+| 平台 | 状态 | 说明 |
+| --- | --- | --- |
+| macOS | 支持最佳 | 透明模式在这里体验最完整 |
+| Windows | 支持 | 采用同一套悬浮阅读逻辑，建议在目标机器上实测 |
+| Linux | 支持 | 采用同一套悬浮阅读逻辑，Ubuntu 启动时会优先使用更稳妥的多行恢复模式 |
+
+## 支持的格式
+
+| 格式 | 支持情况 | 说明 |
+| --- | --- | --- |
+| `txt` | 完整支持 | 包含编码识别 |
+| `epub` | 文本提取 | 抽取章节正文进入现有阅读流 |
+| `html` / `htm` / `xhtml` | 文本提取 | 去掉页面外壳，只保留主体文本 |
+| `md` / `markdown` | 文本提取 | 去掉 Markdown 语法后进入阅读 |
+| `fb2` | 文本提取 | 提取 FictionBook 主体章节文本 |
+| `docx` | 文本提取 | 抽取 Word 正文进入现有的文本阅读流 |
+| `pdf` | 文本提取 | 尽力抽取文本层内容；扫描版或复杂排版 PDF 可能失败或顺序不理想 |
+
+
+## Todo
+
+- [x] 在应用内补上“关于应用”，显示版本号并提供 bug 反馈入口
+- [ ] 优化书架体验，包括更好的整理方式和导入书籍恢复能力
+- [x] 增加更多阅读控制项，比如行距、阅读宽度、快捷键、老板键
+- [x] 提供更多电子书格式支持，比如 docx / pdf
+- [ ] 继续提升 `epub`、`html` 和特殊编码文本的导入稳定性
+- [ ] 支持自定义字体
+- [ ] 伪装成输入法
+
+
+## 项目方向
+
+SuccessReader 是一个带有明确取舍的项目：
+
+- 尽量少的界面元素
+- 更像桌面悬浮工具，而不是重书库管理器
+- 优先做“文本提取后轻量阅读”，而不是复杂原样排版还原
+
+这样它才足够轻、足够快，也足够适合长期挂在桌面边缘。
